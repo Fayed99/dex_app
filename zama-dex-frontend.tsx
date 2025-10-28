@@ -2,25 +2,33 @@ import React, { useState, useEffect } from 'react';
 import { Wallet, ArrowDownUp, Droplets, TrendingUp, TrendingDown, Activity, Lock, Eye, EyeOff, RefreshCw, Settings, X, Plus, Clock, Filter, Download } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 
-// Mock FHEVM SDK functions (replace with actual @fhevm/sdk imports)
-const mockFHEVM = {
-  createEncryptedInput: (contractAddress, userAddress) => ({
-    add64: (value) => ({ value }),
+// FHEVM SDK dynamic loader with graceful fallback
+type FHEHelpers = {
+  createEncryptedInput: (contractAddress: string, userAddress: string) => {
+    add64: (value: number | string) => any;
+    encrypt: () => Promise<{ handles: string[]; proof?: string }>;
+  };
+  userDecryptEuint: (type: string, handle: string, contractAddress: string, signerAddress: string) => Promise<number | string>;
+};
+
+const buildMockFHE = (): FHEHelpers => ({
+  createEncryptedInput: () => ({
+    add64: (value: any) => ({ value }),
     encrypt: async () => ({
       handles: ['0x' + Math.random().toString(16).slice(2)],
       proof: '0x' + Array(128).fill(0).map(() => Math.floor(Math.random() * 16).toString(16)).join('')
     })
   }),
-  userDecryptEuint: async (type, handle, contractAddress, signer) => {
-    return Math.floor(Math.random() * 10000);
-  }
-};
+  userDecryptEuint: async () => Math.floor(Math.random() * 10000)
+});
 
 const App = () => {
   const [activeTab, setActiveTab] = useState('swap');
   const [isConnected, setIsConnected] = useState(false);
   const [walletAddress, setWalletAddress] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [chainId, setChainId] = useState<string | number>('');
+  const [fhe, setFhe] = useState<FHEHelpers | null>(null);
   const [priceData, setPriceData] = useState([
     { time: '00:00', price: 2000 },
     { time: '04:00', price: 2050 },
@@ -73,17 +81,49 @@ const App = () => {
   
   // Mock wallet connection
   const connectWallet = async () => {
-    setIsProcessing(true);
-    setTimeout(() => {
-      setIsConnected(true);
-      setWalletAddress('0x742d...5a3f');
+    try {
+      setIsProcessing(true);
+      const { ethereum } = window as any;
+      if (!ethereum) {
+        alert('MetaMask not found. Please install it to continue.');
+        setIsProcessing(false);
+        return;
+      }
+      const accounts = await ethereum.request({ method: 'eth_requestAccounts' });
+      const cid = await ethereum.request({ method: 'eth_chainId' });
+      const addr = accounts?.[0] || '';
+      setWalletAddress(addr);
+      setChainId(cid);
+      setIsConnected(Boolean(addr));
+
+      // Try to load FHEVM SDK dynamically
+      try {
+        const mod: any = await import(/* webpackIgnore: true */ '@fhevm/sdk').catch(() => null);
+        if (mod && (mod.createEncryptedInput || (mod.default && mod.default.createEncryptedInput))) {
+          const helpers: FHEHelpers = {
+            createEncryptedInput: (mod.createEncryptedInput || mod.default.createEncryptedInput),
+            userDecryptEuint: (mod.userDecryptEuint || mod.default.userDecryptEuint)
+          } as any;
+          setFhe(helpers);
+        } else {
+          setFhe(buildMockFHE());
+        }
+      } catch (_) {
+        setFhe(buildMockFHE());
+      }
+
+      // Initialize example encrypted placeholders
       setBalances({
-        ETH: { encrypted: true, value: '0xabc123...', decrypted: null },
-        USDC: { encrypted: true, value: '0xdef456...', decrypted: null },
-        DAI: { encrypted: true, value: '0xghi789...', decrypted: null }
+        ETH: { encrypted: true, value: '0xencETH', decrypted: null },
+        USDC: { encrypted: true, value: '0xencUSDC', decrypted: null },
+        DAI: { encrypted: true, value: '0xencDAI', decrypted: null }
       });
+    } catch (e) {
+      console.error(e);
+      alert('Failed to connect wallet');
+    } finally {
       setIsProcessing(false);
-    }, 1500);
+    }
   };
   
   const disconnectWallet = () => {
@@ -101,14 +141,24 @@ const App = () => {
     if (!balances[token].value) return;
     
     setIsProcessing(true);
-    setTimeout(() => {
-      const mockDecryptedValue = (Math.random() * 1000).toFixed(2);
-      setBalances(prev => ({
-        ...prev,
-        [token]: { ...prev[token], decrypted: mockDecryptedValue }
-      }));
+    try {
+      // If FHE helpers are available, attempt a decrypt (placeholder call)
+      if (fhe && walletAddress) {
+        const decrypted = await fhe.userDecryptEuint('euint64', balances[token].value, '0xCONTRACT', walletAddress);
+        setBalances(prev => ({
+          ...prev,
+          [token]: { ...prev[token], decrypted: String(decrypted) }
+        }));
+      } else {
+        const mockDecryptedValue = (Math.random() * 1000).toFixed(2);
+        setBalances(prev => ({
+          ...prev,
+          [token]: { ...prev[token], decrypted: mockDecryptedValue }
+        }));
+      }
+    } finally {
       setIsProcessing(false);
-    }, 1000);
+    }
   };
   
   // Swap handler
@@ -117,13 +167,19 @@ const App = () => {
     
     setIsProcessing(true);
     
-    // Simulate encryption and swap
-    setTimeout(() => {
-      alert(`Swapping ${fromAmount} ${fromToken} for ~${toAmount} ${toToken}\nTransaction encrypted and submitted!`);
+    try {
+      // Example: encrypt input (placeholder until real contract wired)
+      if (fhe && walletAddress) {
+        const enc = fhe.createEncryptedInput('0xCONTRACT', walletAddress);
+        enc.add64(Number(fromAmount));
+        await enc.encrypt();
+      }
+      alert(`Swapping ${fromAmount} ${fromToken} for ~${toAmount} ${toToken}`);
       setFromAmount('');
       setToAmount('');
+    } finally {
       setIsProcessing(false);
-    }, 2000);
+    }
   };
   
   // Add liquidity handler
@@ -132,12 +188,19 @@ const App = () => {
     
     setIsProcessing(true);
     
-    setTimeout(() => {
-      alert(`Adding liquidity:\n${liquidityAmountA} ${liquidityTokenA}\n${liquidityAmountB} ${liquidityTokenB}\nEncrypted transaction submitted!`);
+    try {
+      if (fhe && walletAddress) {
+        const enc = fhe.createEncryptedInput('0xCONTRACT', walletAddress);
+        enc.add64(Number(liquidityAmountA));
+        enc.add64(Number(liquidityAmountB));
+        await enc.encrypt();
+      }
+      alert(`Adding liquidity:\n${liquidityAmountA} ${liquidityTokenA}\n${liquidityAmountB} ${liquidityTokenB}`);
       setLiquidityAmountA('');
       setLiquidityAmountB('');
+    } finally {
       setIsProcessing(false);
-    }, 2000);
+    }
   };
   
   // Calculate estimated output (mock calculation)
